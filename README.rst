@@ -1,6 +1,10 @@
 Zip file streamer for HTTP
 ==========================
 
+Changes on this fork:
+
+- Refactor implementation to work with Django storage classes (works with local storage and S3)
+
 Similar systems/projects:
 
 * The `Nginx zip module
@@ -14,18 +18,18 @@ Usage:
 .. code:: python
 
     import zipseeker
-    
+
     # Create an index
     fp = zipseeker.ZipSeeker()
     fp.add('some/file.txt')
     fp.add('another/file.txt', 'file2.txt')
-    
+
     # Calculate the total file size, e.g. for the Content-Length HTTP header.
     contentLength = fp.size()
-    
+
     # Calculate the last-modified date, e.g. for the Last-Modified HTTP header.
     lastModified = fp.lastModified()
-    
+
     # Send the ZIP file to the client
     # Optionally add the start and end parameters for range requests.
     # Note that the ZIP format doesn't support actually skipping parts of the file,
