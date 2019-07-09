@@ -1,13 +1,14 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
-import os
-import time
-import stat
+import calendar
 import io
-import ctypes
+import stat
 import struct
+import time
 import zlib
+
+from collections import namedtuple
 
 # https://users.cs.jmu.edu/buchhofp/forensics/formats/pkzip.html
 # https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
@@ -42,8 +43,8 @@ class ZipFileChanged(Exception):
     pass
 
 class ZipFile:
-    def __init__(self, path, zipname, st, offset):
-        self.path = path
+    def __init__(self, file, zipname, st, offset):
+        self.file = file
         self.zipname = zipname
         self.st = st
         self.localHeaderOffset = offset
@@ -87,19 +88,26 @@ class ZipSeeker:
     def __init__(self):
         self.files = []
 
-    def add(self, path, zipname=None):
-        '''
+    def add(self, file, zipname=None):
+        """
         Add a file to this ZIP.
         Doesn't actually read the file, only stat()s it.
         You may need to provide another name for use within the ZIP.
-        '''
+        """
         if zipname is None:
-            zipname = path
-        st = os.stat(path)
+            zipname = file.name
+
+        mtime = file.storage.get_modified_time(file.name)
+        st = {
+            "st_size": file.size,
+            "st_mtime": calendar.timegm(mtime.utctimetuple())
+        }
+        st_obj = namedtuple('Stat', st.keys())(*st.values())
+
         offset = 0
         if len(self.files):
             offset = self.files[-1].localHeaderOffset + self.files[-1].localSize()
-        self.files.append(ZipFile(path, zipname.encode('utf-8'), st, offset))
+        self.files.append(ZipFile(file, zipname.encode('utf-8'), st_obj, offset))
 
     def size(self):
         '''
@@ -138,7 +146,7 @@ class ZipSeeker:
         return size
 
     def blocks(self):
-        for file in self.files:
+        for zipfile in self.files:
 
             # local file header
             # length is 30 bytes (LOCAL_FILE_HEADER_SIZE)
@@ -147,33 +155,33 @@ class ZipSeeker:
                 ZIP_VERSION, b'\x00',   # 2-byte PKZIP version
                 FLAGS,                  # 2-byte flags
                 0,                      # 2-byte compression (no compression)
-                file.dos_time(),        # 2-byte modtime in MS-DOS format
-                file.dos_date(),        # 2-byte moddate in MS-DOS format
+                zipfile.dos_time(),        # 2-byte modtime in MS-DOS format
+                zipfile.dos_date(),        # 2-byte moddate in MS-DOS format
                 0,                      # 4-byte checksum - stored in data descriptor
-                file.st.st_size,        # 4-byte compressed size
-                file.st.st_size,        # 4-byte uncompressed size
-                len(file.zipname),      # 2-byte filename length
+                zipfile.st.st_size,        # 4-byte compressed size
+                zipfile.st.st_size,        # 4-byte uncompressed size
+                len(zipfile.zipname),      # 2-byte filename length
                 0)                      # 2-byte extra field length
 
             # Write the zip filename
-            yield file.zipname
+            yield zipfile.zipname
 
             # actual file data (without compression)
             checksum = 0
             size = 0
-            fp = open(file.path, 'rb')
+            fp = zipfile.file.storage.open(zipfile.file.name, 'rb')
             buf = fp.read(BLOCKSIZE)
             while buf:
                 size += len(buf)
-                if size > file.st.st_size:
-                    raise ZipFileChanged('file %s at least %d bytes too big' % (repr(file.zipname), size - file.st.st_size))
+                if size > zipfile.st.st_size:
+                    raise ZipFileChanged('file %s at least %d bytes too big' % (repr(zipfile.zipname), size - zipfile.st.st_size))
                 checksum = zlib.crc32(buf, checksum) & 0xffffffff
                 yield buf
                 buf = fp.read(BLOCKSIZE)
             fp.close()
-            if size != file.st.st_size:
-                raise ZipFileChanged('file %s with size %d doesn\'t match st_size %d' % (repr(file.zipname), size, file.st.st_size))
-            file.checksum = checksum
+            if size != zipfile.st.st_size:
+                raise ZipFileChanged('file %s with size %d doesn\'t match st_size %d' % (repr(zipfile.zipname), size, zipfile.st.st_size))
+            zipfile.checksum = checksum
 
             # Data descriptor
             # Not strictly necessary, but doesn't add much overhead and might
@@ -190,28 +198,28 @@ class ZipSeeker:
 
         # Write the central directory file headers
         # Length is 46 bytes + file name (CENTRAL_DIRECTORY_FILE_HEADER_SIZE)
-        for file in self.files:
+        for zipfile in self.files:
             yield struct.pack('<IccccHHHHIIIHHHHHII',
                 0x02014b50,                 # 4-byte signature: "PK\x01\x02"
                 ZIP_VERSION, b'\x03',       # 2-byte system and version, copied from Python zipfile output
                 ZIP_VERSION, b'\x00',       # 2-byte PKZIP version needed
                 FLAGS,                      # 2-byte flags
                 0,                          # 2-byte compression (no compression)
-                file.dos_time(),            # 2-byte last modified time (local time)
-                file.dos_date(),            # 2-byte last modified date (local time)
-                file.checksum,              # 4-byte CRC-32 checksum
-                file.st.st_size,            # 4-byte compressed size (not read due to flag bit 3 being set)
-                file.st.st_size,            # 4-byte uncompressed size (not read due to flag bit 3 being set)
-                len(file.zipname),          # 2-byte filename length
+                zipfile.dos_time(),            # 2-byte last modified time (local time)
+                zipfile.dos_date(),            # 2-byte last modified date (local time)
+                zipfile.checksum,              # 4-byte CRC-32 checksum
+                zipfile.st.st_size,            # 4-byte compressed size (not read due to flag bit 3 being set)
+                zipfile.st.st_size,            # 4-byte uncompressed size (not read due to flag bit 3 being set)
+                len(zipfile.zipname),          # 2-byte filename length
                 0,                          # 2-byte extra field length
                 0,                          # 2-byte comment length (no comment)
                 0,                          # 2-byte disk number (no split archives, always 0)
                 0,                          # 2-byte internal attributes, TODO detect text files
                 EXTERNAL_ATTRIBUTES,        # 4-byte external attributes
-                file.localHeaderOffset)     # 4-byte offset (index) of local header
+                zipfile.localHeaderOffset)     # 4-byte offset (index) of local header
 
             # file name
-            yield file.zipname
+            yield zipfile.zipname
 
         # Write the end of central directory record
 
