@@ -1,5 +1,7 @@
 __pycache__
 *.pyc
+*.egg-info
+.vscode
 build/
 dist/
 MANIFEST
